@@ -1,0 +1,281 @@
+;**********************************************************************
+;                      ___             ___                            *
+;                     | __|_ _  ___ _ |_ _|__ _                       *
+;                     | _|| ' \/ -_) '_| |/ _` |                      *
+;                     |___|_||_\___|_||___\__, |                      *
+;                                         |___/                       *
+;                                                                     *
+;   This program implements the ignition controller for the GURGEL    *
+;   Enertron Two-Cylinder boxer engine. It is based on the patent     *
+;   issued by the Amaral Gurgel, now expired.                         *
+;                                                                     *
+;**********************************************************************
+;                                                                     *
+;    Filename:	   main.asm                                           *
+;    Version 0.1   May 2nd 2016                                       *
+;    - Basic release                                                  *
+;                                                                     *
+;    Author:  Daniel Jose Viana                                       *
+;    Company:  http://danjovic.blogspot.com                           *
+;              http://hackaday.io/danjovic                            *
+;                                                                     *
+;**********************************************************************
+;              This code is licensed under GPL V2.0                   *
+;**********************************************************************
+;         ASCII titles by http://patorjk.com/software/taag/           *
+;**********************************************************************
+
+;  ___ ___ ___ _ ___ ___ ______ ___
+; | _ \_ _/ __/ |_  ) __/ /__  | __|
+; |  _/| | (__| |/ /| _/ _ \/ /|__ \
+; |_| |___\___|_/___|_|\___/_/ |___/
+;
+	list	 p=12f675	; list directive to define processor
+	#include <P12F675.inc>	; processor specific variable definitions
+	__CONFIG    _CP_OFF & _CPD_OFF & _BODEN_ON & _MCLRE_OFF & _PWRTE_ON & _WDT_OFF & _INTRC_OSC_NOCLKOUT
+
+; Pins from GPIO
+_P0    EQU 0 ;
+_P1    EQU 1 ;
+_P2    EQU 2 ;
+_P3    EQU 3 ;
+_P4    EQU 4 ;
+_P5    EQU 5 ;
+
+_COUT  EQU 2 ;
+_VACUUM EQU 3; 
+_COIL  EQU 5;
+
+
+;**********************************************************************
+;  ___       __ _      _ _   _
+; |   \ ___ / _(_)_ _ (_) |_(_)___ _ _  ___
+; | |) / -_)  _| | ' \| |  _| / _ \ ' \(_-<
+; |___/\___|_| |_|_||_|_|\__|_\___/_||_/__/
+;
+;**********************************************************************
+
+; Macros
+#define  _bank0  bcf STATUS,RP0
+#define  _bank1  bsf STATUS,RP0
+
+T_trb       EQU  .9  ;  8 ticks of 256us = 2ms minimum time for spark
+T_base		EQU  .5  ;  4 ticks of 256us = 1,024ms
+T_base_vac  EQU .11  ; 10 ticks of 256us = 1ms + 1,5ms = 2,56ms
+
+;**********************************************************************
+; __   __        _      _    _
+; \ \ / /_ _ _ _(_)__ _| |__| |___ ___
+;  \ V / _` | '_| / _` | '_ \ / -_|_-<
+;   \_/\__,_|_| |_\__,_|_.__/_\___/__/
+;                                     
+;**********************************************************************
+
+ cblock 0x20
+
+Conta 
+Timeout_Counter ; 8 bit timeout counter
+
+tmrH      ; 16 bit counting timer
+tmrL
+
+Temp        ; temporary storage
+
+w_temp	     ; variable used for context saving
+status_temp  ; variable used for context saving
+ endc 
+
+
+;**********************************************************************
+;  ___ _            _
+; / __| |_ __ _ _ _| |_ _  _ _ __
+; \__ \  _/ _` | '_|  _| || | '_ \
+; |___/\__\__,_|_|  \__|\_,_| .__/
+;                           |_|
+;**********************************************************************
+
+ 
+	ORG		0x000			; processor reset vector
+   	goto		main			; go to beginning of program
+
+
+	ORG		0x004			; interrupt vector location
+	movwf		w_temp			; save off current W register contents
+	movf		STATUS,w		; move status register into W register
+	movwf		status_temp		; save off contents of STATUS register
+
+; isr code can go here or be located as a call subroutine elsewhere
+
+	movf		status_temp,w		; retrieve copy of STATUS register
+	movwf		STATUS			; restore pre-isr STATUS register contents
+	swapf		w_temp,f
+	swapf		w_temp,w		; restore pre-isr W register contents
+	retfie					; return from interrupt
+
+
+
+;**********************************************************************
+;  __  __      _        ___             _   _
+; |  \/  |__ _(_)_ _   | __|  _ _ _  __| |_(_)___ _ _
+; | |\/| / _` | | ' \  | _| || | ' \/ _|  _| / _ \ ' \
+; |_|  |_\__,_|_|_||_| |_| \_,_|_||_\__|\__|_\___/_||_|
+;
+;**********************************************************************
+main
+	; Configure Hardware
+	movlw b'00000001'
+
+	movwf CMCON         ; analog comparator with cout
+	movlw b'00001101'   ; ADC right justified, Vref=Vcc, CH3 selected
+	movwf ADCON0
+
+
+
+	clrwdt
+
+
+
+	_bank1; --543210 
+	movlw b'11011011' ; GPIO 2 and 5 as outputs
+	movwf TRISIO
+
+	movlw b'00011000' ; fosc/8, CH3 as ADC input 
+	movwf ANSEL
+ 
+	movlw b'00000111' ; Select TMR0 prescale 1:256, internal clock source
+	movwf OPTION_REG
+
+	; initialize variables
+	_bank0
+
+
+
+	; start the show
+restart
+	bcf GPIO,_COIL  ; turn off coil
+next_edge
+	clrf TMR0
+	bcf INTCON,T0IF  ; clear pending overflow
+	bsf PIR1,CMIF    ; clear any pending interrupt
+	movlw .255-.12 ;  _Timeout_      set timeout for 800ms like the RC timer
+	movwf Timeout_Counter   ;
+;
+
+test
+;	goto wait_advance
+
+wait_rising_edge
+	movf PIR1,w ; bit 3 = CMIF
+	andlw (1<<CMIF) ; isolate bit CMIF (3)
+	movwf Temp
+	movf GPIO,w
+	andlw (1<<_COUT) ; isolate bit COUT (2)
+	iorwf Temp,w
+	xorlw b'00001100' ;
+	btfsc STATUS,Z    ; rising edge ?
+	goto wait_advance ; yes, go on
+                      ; no, test for timeout
+	btfss INTCON,T0IF     ; timer 1 overflowed (65ms)
+	goto wait_rising_edge ; no, keep sampling input
+	bcf INTCON,T0IF     ; increment timeout timer
+	incfsz Timeout_Counter ; overflowed ?
+	goto wait_rising_edge  ; no, keep sampling input
+	goto restart           ; yes, we timed out, restart everything
+
+	
+
+wait_advance
+	; Now wait for Advance Time
+	movlw .255-T_base       ; base time
+	btfss GPIO,_VACUUM
+	movlw .255-T_base_vac   ; Total advance (tbase + tvacuum)
+	clrf TMR0				; reset timer
+	bcf INTCON,T0IF         ; clear any pending flag
+	movwf TMR0				; now will count up to total advance time
+	btfss INTCON,T0IF		; wait for overflow after total advance time
+	goto $-1
+	
+	; now check if signal have dropped. according to the circuit
+	; the low level is what matters and not the falling edge
+	; 
+;	clrf tmrH
+;	clrf tmrL
+hasfallen
+	btfss GPIO,_COUT   ; 1 test if pin low
+	goto decrement     ; 1 yes, start decrement phase
+	; increment phase
+    incf tmrH,f        ; 1  increment timer
+    incfsz tmrL,f      ; 1  10 instructions = 10us
+    decf tmrH,f        ; 1  timeout on 65535ms.
+
+	movf tmrH,w        ;1  ;testforzero
+	iorwf tmrL,w       ;1
+	btfss STATUS,Z     ;1 skip if zero
+	goto hasfallen     ;2 test again for fallen _COUT
+
+	goto dropcoil      ; turn off coil on overflow
+	
+           ; 10 ticks for each interaction
+
+
+
+	bsf PIR1,CMIF    ; reset comparator interr flag
+decrement   
+	movf tmrH,w        ;1    test for zero 
+	iorwf tmrL,w       ;1
+	btfsc STATUS,Z     ;1 skip if not zero
+	goto dropcoil	   ;1
+					   
+	; now decrement counter	
+	movf    tmrL,f  ; 1
+  	btfsc STATUS,Z  ; 1
+   	decf   tmrH,f   ; 1
+ 	decf   tmrL,f   ; 1
+	goto decrement  ; 2
+	
+dropcoil
+	bcf GPIO,_COIL ; turn off coil
+	clrf tmrH      ; clear up/down counter
+	clrf tmrL	
+
+	movlw .255-T_trb        ; Time for coil to rest
+	clrf TMR0				; reset timer
+	bcf INTCON,T0IF         ; clear any pending flag
+	movwf TMR0				; now will count up to total advance time
+	btfss INTCON,T0IF		; wait for overflow after total advance time
+	goto $-1	
+		
+	bsf GPIO,_COIL ; turn coil on again
+
+	goto next_edge  ;  Now wait for next rising edge from sensor
+
+
+; test routine
+;rep
+;   bsf ADCON0, GO_NOT_DONE
+;   btfsc ADCON0, GO_NOT_DONE
+;   goto $-1
+;	movf ADRESH,w
+;	movwf Conta
+;	bsf GPIO,5
+;rep2
+;	nop 
+;	nop 
+
+;	decfsz Conta,f
+;	goto rep2
+;	bcf GPIO,5
+
+;	nop;
+;	nop
+;	nop
+;	nop
+
+;	goto rep
+;;
+
+
+
+
+;
+	END
