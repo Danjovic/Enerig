@@ -1,0 +1,793 @@
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  1
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00001 ;**********************************************************************
+                      00002 ;                      ___             ___                            *
+                      00003 ;                     | __|_ _  ___ _ |_ _|__ _                       *
+                      00004 ;                     | _|| ' \/ -_) '_| |/ _` |                      *
+                      00005 ;                     |___|_||_\___|_||___\__, |                      *
+                      00006 ;                                         |___/                       *
+                      00007 ;                                                                     *
+                      00008 ;   This program implements the ignition controller for the GURGEL    *
+                      00009 ;   Enertron Two-Cylinder boxer engine. It is based on the patent     *
+                      00010 ;   issued by the Amaral Gurgel, now expired.                         *
+                      00011 ;                                                                     *
+                      00012 ;**********************************************************************
+                      00013 ;                                                                     *
+                      00014 ;    Filename:     main.asm                                           *
+                      00015 ;    Version 0.1   May 2nd 2016                                       *
+                      00016 ;    - Basic release                                                  *
+                      00017 ;    Version 0.7   May 13th 2016                                      *
+                      00018 ;    - First Candidate Version                                        *
+                      00019 ;                                                                     *
+                      00020 ;    Author:  Daniel Jose Viana                                       *
+                      00021 ;    Company:  http://danjovic.blogspot.com                           *
+                      00022 ;              http://hackaday.io/danjovic                            *
+                      00023 ;                                                                     *
+                      00024 ;**********************************************************************
+                      00025 ;              This code is licensed under GPL V2.0                   *
+                      00026 ;**********************************************************************
+                      00027 ;         ASCII titles by http://patorjk.com/software/taag/           *
+                      00028 ;**********************************************************************
+                      00029 
+                      00030 ;  ___ ___ ___ _ ___ ___ ______ ___
+                      00031 ; | _ \_ _/ __/ |_  ) __/ /__  | __|
+                      00032 ; |  _/| | (__| |/ /| _/ _ \/ /|__ \
+                      00033 ; |_| |___\___|_/___|_|\___/_/ |___/
+                      00034 ;
+                      00035         list     p=12f675       ; list directive to define processor
+                      00036         #include <P12F675.inc>  ; processor specific variable definitions
+                      00001         LIST
+                      00002 
+                      00003 ;==========================================================================
+                      00004 ;  MPASM PIC12F675 processor include
+                      00005 ; 
+                      00006 ;  (c) Copyright 1999-2013 Microchip Technology, All rights reserved
+                      00007 ;==========================================================================
+                      00008 
+                      00366         LIST
+2007   3FC4           00037         __CONFIG    _CP_OFF & _CPD_OFF & _BODEN_ON & _MCLRE_OFF & _PWRTE_ON & _WDT_OFF & _INTRC_OSC_NOCL
+                            KOUT
+                      00038 
+                      00039 ; Pins from GPIO
+  00000000            00040 _P0    EQU 0 ;
+  00000001            00041 _P1    EQU 1 ;
+  00000002            00042 _P2    EQU 2 ;
+  00000003            00043 _P3    EQU 3 ;
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  2
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+  00000004            00044 _P4    EQU 4 ;
+  00000005            00045 _P5    EQU 5 ;
+                      00046 
+  00000002            00047 _COUT  EQU 2 ;
+  00000003            00048 _VACUUM EQU 3;
+  00000005            00049 _COIL  EQU 5;
+                      00050 
+                      00051 
+                      00052 ;**********************************************************************
+                      00053 ;  ___       __ _      _ _   _
+                      00054 ; |   \ ___ / _(_)_ _ (_) |_(_)___ _ _  ___
+                      00055 ; | |) / -_)  _| | ' \| |  _| / _ \ ' \(_-<
+                      00056 ; |___/\___|_| |_|_||_|_|\__|_\___/_||_/__/
+                      00057 ;
+                      00058 ;**********************************************************************
+                      00059 
+                      00060 ; Macros
+                      00061 #define  _bank0  bcf STATUS,RP0
+                      00062 #define  _bank1  bsf STATUS,RP0
+                      00063 
+                      00064 #ifndef GO_NOT_DONE  ; compatibility with gpasm
+                      00065 #define GO_NOT_DONE 1 ; bit 1
+                      00066 #endif 
+                      00067 
+                      00068 #define F_CLOCK_MHz      .4              ; internal clock, 4MHz
+                      00069 #define F_CPU_MHz   F_CLOCK_MHz/.4       ; 1 cpu cycle at each 1us (1MHz)
+                      00070 #define T0_presc .16                     ; Prescaler for Timer 0
+                      00071 #define T0_tick_us  .16 ;  T0_presc/F_CPU_MHz ;
+                      00072 
+                      00073 #define T_RB_us   .2000
+                      00074 #define T_Ac_us   .1000
+                      00075 #define T_Av_us   .1500
+                      00076 
+                      00077 #define Cnt_RB T_RB_us/T0_tick_us  ;  2ms Time for coil to discharge
+                      00078 #define Cnt_Ac T_Ac_us/T0_tick_us  ;  1ms basic advance time
+                      00079 #define Cnt_Av T_Av_us/T0_tick_us  ;1,5ms extra advance time due to engine load
+                      00080 
+                      00081 #define T_256C_us .4096; 256*T0_tick_us  ; Time for 256 counts
+                      00082 #define Cnt_Timeout  .800000/T_256C_us
+                      00083 
+                      00084 #define f_run 0  ; First run flag 
+                      00085 
+                      00086 
+                      00087 ;**********************************************************************
+                      00088 ; __   __        _      _    _
+                      00089 ; \ \ / /_ _ _ _(_)__ _| |__| |___ ___
+                      00090 ;  \ V / _` | '_| / _` | '_ \ / -_|_-<
+                      00091 ;   \_/\__,_|_| |_\__,_|_.__/_\___/__/
+                      00092 ;
+                      00093 ;**********************************************************************
+                      00094 
+                      00095  cblock 0x20
+                      00096 
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  3
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+  00000020            00097 Conta
+                      00098 
+  00000021            00099 Flags ; flags. Bit 0: first_run
+                      00100 
+  00000022            00101 Timeout_Counter ; 8 bit timeout counter
+                      00102 
+  00000023            00103 TrbH      ; Coil Rest Time
+  00000024            00104 TrbL
+                      00105 
+  00000025            00106 TcyH      ; Cycle Time
+  00000026            00107 TcyL
+                      00108 
+  00000027            00109 TchargeH  ; Charging Time
+  00000028            00110 TchargeL
+                      00111 
+  00000029            00112 tmrH      ; 16 bit counting timer
+  0000002A            00113 tmrL
+                      00114 
+  0000002B            00115 Temp        ; temporary storage
+                      00116 
+  0000002C            00117 w_temp       ; variable used for context saving
+  0000002D            00118 status_temp  ; variable used for context saving
+                      00119  endc
+                      00120 
+                      00121 
+                      00122 ;**********************************************************************
+                      00123 ;  ___ _            _
+                      00124 ; / __| |_ __ _ _ _| |_ _  _ _ __
+                      00125 ; \__ \  _/ _` | '_|  _| || | '_ \
+                      00126 ; |___/\__\__,_|_|  \__|\_,_| .__/
+                      00127 ;                           |_|
+                      00128 ;**********************************************************************
+                      00129 
+                      00130  
+                      00131         ORG             0x000                   ; processor reset vector
+0000   2???           00132         goto            main                    ; go to beginning of program
+                      00133 
+                      00134 
+                      00135         ORG             0x004                   ; interrupt vector location
+0004   00AC           00136         movwf           w_temp                  ; save off current W register contents
+0005   0803           00137         movf            STATUS,w                ; move status register into W register
+0006   00AD           00138         movwf           status_temp             ; save off contents of STATUS register
+                      00139 
+                      00140     ; ISR code 
+0007   1C0C           00141         btfss PIR1,TMR1IF  ; test for TIMER1 interrupt
+0008   2???           00142         goto end_interrupt ; no, leave the IRQ code
+0009   1685           00143         bsf GPIO,_COIL     ; yes turn coil on again
+000A   100C           00144         bcf PIR1,TMR1IF    ; and clear interrupt flag
+                      00145 
+000B                  00146 end_interrupt
+000B   082D           00147         movf            status_temp,w           ; retrieve copy of STATUS register
+000C   0083           00148         movwf           STATUS                  ; restore pre-isr STATUS register contents
+000D   0EAC           00149         swapf           w_temp,f
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  4
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+000E   0E2C           00150         swapf           w_temp,w                ; restore pre-isr W register contents
+000F   0009           00151         retfie                                  ; return from interrupt
+                      00152 
+                      00153 
+                      00154 
+                      00155 ;**********************************************************************
+                      00156 ;  __  __      _        ___             _   _
+                      00157 ; |  \/  |__ _(_)_ _   | __|  _ _ _  __| |_(_)___ _ _
+                      00158 ; | |\/| / _` | | ' \  | _| || | ' \/ _|  _| / _ \ ' \
+                      00159 ; |_|  |_\__,_|_|_||_| |_| \_,_|_||_\__|\__|_\___/_||_|
+                      00160 ;
+                      00161 ;**********************************************************************
+0010                  00162 main
+                      00163         ; Configure Hardware
+0010   3001           00164         movlw b'00000001'
+0011   0099           00165         movwf CMCON         ; analog comparator with cout
+                      00166 
+0012   300D           00167         movlw b'00001101'   ; ADC right justified, Vref=Vcc, CH3 selected
+0013   009F           00168         movwf ADCON0
+                      00169 
+0014   3031           00170         movlw b'00110001'  ; Timer1 off, internal clock, prescaler 1:8
+0015   0090           00171         movwf T1CON 
+                      00172 
+0016   1683           00173         _bank1; --543210 
+0017   30DB           00174         movlw b'11011011' ; GPIO 2 and 5 as outputs
+Message[302]: Register in operand not in bank 0.  Ensure that bank bits are correct.
+0018   0085           00175         movwf TRISIO
+                      00176 
+0019   3018           00177         movlw b'00011000' ; fosc/8, CH3 as ADC input 
+Message[302]: Register in operand not in bank 0.  Ensure that bank bits are correct.
+001A   009F           00178         movwf ANSEL
+                      00179  
+001B   3003           00180         movlw b'00000011' ; Select TMR0 prescale 1:16, internal clock source
+Message[302]: Register in operand not in bank 0.  Ensure that bank bits are correct.
+001C   0081           00181         movwf OPTION_REG
+                      00182 
+Message[302]: Register in operand not in bank 0.  Ensure that bank bits are correct.
+001D   140C           00183         bsf PIE1,TMR1IE   ; Enable Timer 1 interrupts
+                      00184 
+001E   23FF           00185         call 3FFh ;Get the cal value
+Message[302]: Register in operand not in bank 0.  Ensure that bank bits are correct.
+001F   0090           00186         movwf OSCCAL ;Calibrate
+                      00187 
+                      00188         ; initialize variables
+0020   1283           00189         _bank0
+0021   01A8           00190         clrf TchargeL
+0022   3010           00191         movlw .16
+0023   00A7           00192         movwf TchargeH
+                      00193 
+                      00194 
+                      00195 
+                      00196         ; turn interrupts
+0024   018E           00197         clrf TMR1L
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  5
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0025   018F           00198         clrf TMR1H
+0026   100C           00199         bcf PIR1,TMR1IF
+0027   170B           00200         bsf INTCON,PEIE
+0028   178B           00201         bsf INTCON,GIE
+                      00202 
+                      00203 ;************************************************************
+                      00204 ;   Start the show
+                      00205 ; 
+0029                  00206 restart
+0029   1285           00207         bcf GPIO,_COIL      ; turn off coil
+002A   1010           00208         bcf T1CON,TMR1ON    ; turn off timer1
+002B   1421           00209         bsf Flags,f_run ; mark as first run 
+                      00210 
+002C                  00211 next_edge
+002C   0181           00212         clrf TMR0
+002D   110B           00213         bcf INTCON,T0IF  ; clear pending overflow
+002E   158C           00214         bsf PIR1,CMIF    ; clear any pending interrupt
+002F   303D           00215         movlw .256-Cnt_Timeout ;  _Timeout_      set timeout for 800ms like the RC timer
+0030   00A2           00216         movwf Timeout_Counter   ;
+                      00217 ;
+                      00218 
+                      00219 
+0031                  00220 wait_rising_edge
+0031   080C           00221         movf PIR1,w ; bit 3 = CMIF
+0032   3908           00222         andlw (1<<CMIF) ; isolate bit CMIF (3)
+0033   00AB           00223         movwf Temp
+0034   0805           00224         movf GPIO,w
+0035   3904           00225         andlw (1<<_COUT) ; isolate bit COUT (2)
+0036   042B           00226         iorwf Temp,w
+0037   3A0C           00227         xorlw b'00001100' ;
+0038   1903           00228         btfsc STATUS,Z    ; rising edge ?
+0039   2???           00229         goto wait_advance ; yes, go on
+                      00230                       ; no, test for timeout
+003A   1D0B           00231         btfss INTCON,T0IF     ; timer 1 overflowed (65ms)
+003B   2???           00232         goto wait_rising_edge ; no, keep sampling input
+003C   110B           00233         bcf INTCON,T0IF     ; increment timeout timer
+003D   0FA2           00234         incfsz Timeout_Counter,f ; overflowed ?
+003E   2???           00235         goto wait_rising_edge  ; no, keep sampling input
+003F   2???           00236         goto restart           ; yes, we timed out, restart everything
+                      00237 
+0040                  00238 wait_advance
+                      00239         ; Now wait for Advance Time
+0040   30C2           00240         movlw .256-Cnt_Ac       ; base time
+0041   1D85           00241         btfss GPIO,_VACUUM
+0042   3065           00242         movlw .256-(Cnt_Ac+Cnt_Av) ; Total advance (tbase + tvacuum)
+0043   0181           00243         clrf TMR0                               ; reset timer
+0044   110B           00244         bcf INTCON,T0IF         ; clear any pending flag
+0045   0081           00245         movwf TMR0                              ; now will count up to total advance time
+                      00246 
+0046                  00247 waiting_advance_end
+0046   190B           00248         btfsc INTCON,T0IF                ; wait for overflow after total advance time
+0047   2???           00249         goto increment            ; if time is over then increment counter while signal is high
+0048   1D05           00250         btfss GPIO,_COUT         ; otherwise check if signal drop earlier than advance time
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  6
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0049   2???           00251         goto dropcoil            ; if so, drop coil and generate spart immediately
+004A   2???           00252         goto waiting_advance_end ; if not keep waiting
+                      00253         
+                      00254         ; now check if signal have dropped. according to the circuit
+                      00255         ; the low level is what matters and not the falling edge
+                      00256         ; 
+004B                  00257 increment                  ; 10 ticks for each interaction (100KHz) , overflow at 0,65s (655360us)
+004B   1D05           00258         btfss GPIO,_COUT   ; 1 test if pin low
+004C   2???           00259         goto decrement     ; 1 yes, start decrement phase
+                      00260         ; increment phase
+004D   0AA9           00261         incf tmrH,f        ; 1  increment timer
+004E   0FAA           00262         incfsz tmrL,f      ; 1  10 instructions = 10us
+004F   03A9           00263         decf tmrH,f        ; 1  timeout on 65535ms.
+                      00264 
+0050   0829           00265         movf tmrH,w        ;1  ;testforzero
+0051   042A           00266         iorwf tmrL,w       ;1
+0052   1D03           00267         btfss STATUS,Z     ;1 skip if zero
+0053   2???           00268         goto increment     ;2 test again for fallen _COUT
+                      00269 
+0054   2???           00270         goto restart       ;On overflow drop off coil and wait for the next pulse.
+                      00271                            ;this is an improvement over the original circuit where a signal
+                      00272                            ;stuck at a high level would cause the coil to be constantly turned on
+                      00273 
+                      00274 
+0055                  00275 decrement                  ; 10 ticks for each interaction  (10us)
+0055   0829           00276         movf tmrH,w        ;1    test for zero 
+0056   042A           00277         iorwf tmrL,w       ;1
+0057   1903           00278         btfsc STATUS,Z     ;1 skip if not zero
+0058   2???           00279         goto dropcoil      ;1
+                      00280                                            
+                      00281         ; now decrement counter 
+0059   08AA           00282         movf    tmrL,f  ; 1
+005A   1903           00283         btfsc STATUS,Z  ; 1
+005B   03A9           00284         decf   tmrH,f   ; 1
+005C   03AA           00285         decf   tmrL,f   ; 1
+005D   2???           00286         goto decrement  ; 2
+                      00287 
+                      00288 
+                      00289 
+                      00290 ;*******************************************************************
+                      00291 
+005E                  00292 dropcoil
+005E   1285           00293         bcf GPIO,_COIL ; turn off coil
+005F   01A9           00294         clrf tmrH      ; clear up/down counter
+0060   01AA           00295         clrf tmrL
+                      00296 
+                      00297 
+                      00298 
+                      00299 
+                      00300 
+0061   1821           00301         btfsc Flags,f_run    ; is this the first run?
+0062   2???           00302         goto not_first_run   ; no, calculate charge time
+0063                  00303 first_run
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  7
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0063   1021           00304         bcf Flags,f_run      ; not first run anymore
+0064   018F           00305         clrf TMR1H
+0065   018E           00306         clrf TMR1L           ; TIMER1=0
+0066   1410           00307         bsf T1CON,TMR1ON     ; Turn on Timer 1
+0067   01A3           00308         clrf TrbH
+0068   01A4           00309         clrf TrbL                        ; Clear Coil rest timer
+0069   2???           00310         goto next_edge       ; wait for next border
+                      00311           
+006A                  00312 not_first_run
+                      00313 
+                      00314 
+006A   1010           00315         bcf T1CON,TMR1ON     ; stop timer 1
+                      00316 
+                      00317                          ; calculate Tcycle = Timer1 + Trb 
+006B   080E           00318         movf TMR1L,w         ; initialize Tcycle=Timer1
+006C   00A6           00319         movwf TcyL
+006D   080F           00320         movf TMR1H,w
+006E   00A6           00321         movwf TcyL
+                      00322 
+006F   0824           00323         movf TrbL,w           ; Then add Add Trb 
+0070   07A6           00324         addwf TcyL,f
+0071   0823           00325         movf TrbH,w
+0072   1803           00326         btfsc STATUS,C       ; carry? incr high byte
+0073   0A23           00327         incf TrbH,w          ; yes  high byte and discard previous w
+0074   07A5           00328         addwf TcyH,f             ; add high byte
+0075   1803           00329         btfsc STATUS,C           ; carry?
+0076   2???           00330     goto restart         ; yes, invalid rotation, go wait for another
+                      00331 
+                      00332 
+                      00333                                                  ; now test for minimum time (highest RPMs)
+                      00334                                                  ; Tcycle shall be at leas 8192 us or 0x400 counts
+0077   3004           00335         movlw .4             ; which corresponds to 7324 RPM
+0078   0225           00336         subwf TcyH,w             ; test high value of Tcycle only
+0079   1C03           00337         btfss STATUS,C       ; is it less than 4 
+007A   2???           00338         goto restart         ; yes, RPM too high, restart 
+                      00339 
+                      00340 
+                      00341 
+                      00342 
+                      00343     ; no, then subtract Charge Time from Tcycle (3-7,2ms)
+                      00344 
+007B   0828           00345         movf    TchargeL,W         ; Get low byte of subtrahend
+007C   02A6           00346     subwf   TcyL,F         ; Subtract DST(low) - SRC(low)
+007D   0827           00347     movf    TchargeH,W       ; Now get high byte of subtrahend
+007E   1C03           00348     btfss   STATUS,C        ; If there was a borrow, rather than
+007F   0A27           00349     incf    TchargeH,W       ; decrement high byte of dst we inc src
+0080   02A5           00350     subwf   TcyH,F       ; Subtract the high byte and we're done
+                      00351 
+                      00352         ; now Tcycle variable holds the time the coil should stay off
+                      00353 
+0081   0826           00354         movf TcyL,w        ; now Trb holds off time
+0082   00A4           00355         movwf TrbL
+0083   0825           00356         movf TcyH,w
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  8
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0084   00A3           00357         movwf TrbH 
+                      00358 
+                      00359         ; now program Timer 1 with FFFF- Trb
+0085   0924           00360         comf TrbL,w
+0086   008E           00361         movwf TMR1L
+0087   0923           00362         comf TrbH,w
+0088   008F           00363         movwf TMR1H
+                      00364 
+                      00365 ;*********************
+0089   30FF           00366         movlw .255
+008A   008F           00367         movwf TMR1H
+008B   3005           00368         movlw .5
+008C   008E           00369         movwf TMR1L
+                      00370 ;***********************
+                      00371 
+                      00372 
+                      00373         ; then release Timer1
+008D   100C           00374         bcf PIR1,TMR1IF ; clear pending interrupt
+008E   1410           00375         bsf T1CON,TMR1ON ; Turn on Timer 1
+                      00376 
+                      00377         ; Now sample Potentiometer and calculate charge time
+008F   01A8           00378         clrf TchargeL
+0090   3010           00379         movlw .16
+0091   00A7           00380         movwf TchargeH
+                      00381 
+                      00382 
+                      00383         ; go wait for the next edge.
+0092   2???           00384         goto next_edge  
+                      00385 
+                      00386 
+0093                  00387 faz
+                      00388 
+                      00389 ; *******************
+0093   1010           00390         bcf T1CON,TMR1ON ; stop timer 1
+0094   30FF           00391         movlw .255
+0095   008F           00392         movwf TMR1H
+0096   3005           00393         movlw .5
+0097   008E           00394         movwf TMR1L
+0098   100C           00395         bcf PIR1,TMR1IF ; clear pending interrupt
+0099   1410           00396         bsf T1CON,TMR1ON ; Turn on Timer 1
+009A   2???           00397         goto next_edge ; wait for next border
+                      00398 
+                      00399 
+                      00400 ; *******************
+                      00401 
+                      00402 ;       movlw .256-Cnt_RB        ; Time for coil to rest
+                      00403 ;       clrf TMR0               ; reset timer
+                      00404 ;       bcf INTCON,T0IF         ; clear any pending flag
+                      00405 ;       movwf TMR0              ; now will count up to total advance time
+                      00406 ;       
+                      00407 ;
+                      00408 ;read_adc                             ; Use this delay time to read the ADC
+                      00409 ;       bsf ADCON0, GO_NOT_DONE      ; start ADC conversion
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE  9
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00410 ;       btfsc ADCON0, GO_NOT_DONE    ; wait for end of ADC conversion
+                      00411 ;       goto $-1
+                      00412 ;       movf ADRESH,w
+                      00413 ;       movwf Conta                  ; save value for computing delay
+                      00414 ;
+                      00415 ;wait_base_Trb
+                      00416 ;       btfss INTCON,T0IF               ; wait for Coil base Rest time (Trb)
+                      00417 ;       goto $-1
+                      00418 ;
+                      00419 ;
+                      00420 ;        ; Now delay variable time between 0 to 6 ms, according to "Conta"
+                      00421 ;
+                      00422 ;        incf Conta,f    ; adjust interval to start from 1
+                      00423 ;wait_extra_Trb
+                      00424 ;        decf Conta,f    ; 1 1 decrement counter
+                      00425 ;        btfsc STATUS,Z  ; 1 2 reach zero?
+                      00426 ;        goto raise_coil ; 1 3 yes, turn on coil and wait for next cycle
+                      00427 ;        nop             ; 1 4 no, decrement counter
+                      00428 ;        goto $+1        ; 2 6
+                      00429 ;        goto $+1        ; 2 8
+                      00430 ;        goto $+1        ; 2 10
+                      00431 ;        goto $+1        ; 2 12
+                      00432 ;        goto $+1        ; 2 14
+                      00433 ;        goto $+1        ; 2 16
+                      00434 ;        goto $+1        ; 2 18
+                      00435 ;        goto $+1        ; 2 20
+                      00436 ;        goto $+1        ; 2 22
+                      00437 ;        goto wait_extra_Trb ;  2 24  32us per iteraction, maximum time
+                      00438 ;                            ;        is 256*32us = 8192us = 8.192ms
+                      00439 ;
+                      00440 ;raise_coil
+                      00441 ;       bsf GPIO,_COIL  ; turn coil on again
+                      00442 ;       goto next_edge  ;  and go wait for next rising edge from sensor
+                      00443 
+                      00444 ;
+3FC4                  00445         END
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE 10
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+ADCON0                            0000001F
+ADCS0                             00000004
+ADCS1                             00000005
+ADCS2                             00000006
+ADFM                              00000007
+ADIE                              00000006
+ADIF                              00000006
+ADON                              00000000
+ADRESH                            0000001E
+ADRESL                            0000009E
+ANS0                              00000000
+ANS1                              00000001
+ANS2                              00000002
+ANS3                              00000003
+ANSEL                             0000009F
+C                                 00000000
+CAL0                              00000002
+CAL1                              00000003
+CAL2                              00000004
+CAL3                              00000005
+CAL4                              00000006
+CAL5                              00000007
+CHS0                              00000002
+CHS1                              00000003
+CINV                              00000004
+CIS                               00000003
+CM0                               00000000
+CM1                               00000001
+CM2                               00000002
+CMCON                             00000019
+CMIE                              00000003
+CMIF                              00000003
+COUT                              00000006
+Cnt_Ac                            T_Ac_us/T0_tick_us
+Cnt_Av                            T_Av_us/T0_tick_us
+Cnt_RB                            T_RB_us/T0_tick_us
+Cnt_Timeout                       .800000/T_256C_us
+Conta                             00000020
+DC                                00000001
+EEADR                             0000009B
+EECON1                            0000009C
+EECON2                            0000009D
+EEDAT                             0000009A
+EEDATA                            0000009A
+EEIE                              00000007
+EEIF                              00000007
+F                                 00000001
+FSR                               00000004
+F_CLOCK_MHz                       .4
+F_CPU_MHz                         F_CLOCK_MHz/.4
+Flags                             00000021
+GIE                               00000007
+GO                                00000001
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE 11
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+GO_DONE                           00000001
+GO_NOT_DONE                       00000001
+GP0                               00000000
+GP1                               00000001
+GP2                               00000002
+GP3                               00000003
+GP4                               00000004
+GP5                               00000005
+GPIE                              00000003
+GPIF                              00000000
+GPIO                              00000005
+GPIO0                             00000000
+GPIO1                             00000001
+GPIO2                             00000002
+GPIO3                             00000003
+GPIO4                             00000004
+GPIO5                             00000005
+INDF                              00000000
+INTCON                            0000000B
+INTE                              00000004
+INTEDG                            00000006
+INTF                              00000001
+IOC                               00000096
+IOC0                              00000000
+IOC1                              00000001
+IOC2                              00000002
+IOC3                              00000003
+IOC4                              00000004
+IOC5                              00000005
+IOCB                              00000096
+IOCB0                             00000000
+IOCB1                             00000001
+IOCB2                             00000002
+IOCB3                             00000003
+IOCB4                             00000004
+IOCB5                             00000005
+IRP                               00000007
+NOT_BOD                           00000000
+NOT_BOR                           00000000
+NOT_DONE                          00000001
+NOT_GPPU                          00000007
+NOT_PD                            00000003
+NOT_POR                           00000001
+NOT_T1SYNC                        00000002
+NOT_TO                            00000004
+OPTION_REG                        00000081
+OSCCAL                            00000090
+PCL                               00000002
+PCLATH                            0000000A
+PCON                              0000008E
+PEIE                              00000006
+PIE1                              0000008C
+PIR1                              0000000C
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE 12
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+PS0                               00000000
+PS1                               00000001
+PS2                               00000002
+PSA                               00000003
+RD                                00000000
+RP0                               00000005
+RP1                               00000006
+STATUS                            00000003
+T0CS                              00000005
+T0IE                              00000005
+T0IF                              00000002
+T0SE                              00000004
+T0_presc                          .16
+T0_tick_us                        .16
+T1CKPS0                           00000004
+T1CKPS1                           00000005
+T1CON                             00000010
+T1IE                              00000000
+T1IF                              00000000
+T1OSCEN                           00000003
+TMR0                              00000001
+TMR0IE                            00000005
+TMR0IF                            00000002
+TMR1                              0000000E
+TMR1CS                            00000001
+TMR1GE                            00000006
+TMR1H                             0000000F
+TMR1IE                            00000000
+TMR1IF                            00000000
+TMR1L                             0000000E
+TMR1ON                            00000000
+TRISIO                            00000085
+TRISIO0                           00000000
+TRISIO1                           00000001
+TRISIO2                           00000002
+TRISIO3                           00000003
+TRISIO4                           00000004
+TRISIO5                           00000005
+T_256C_us                         .4096
+T_Ac_us                           .1000
+T_Av_us                           .1500
+T_RB_us                           .2000
+TchargeH                          00000027
+TchargeL                          00000028
+TcyH                              00000025
+TcyL                              00000026
+Temp                              0000002B
+Timeout_Counter                   00000022
+TrbH                              00000023
+TrbL                              00000024
+VCFG                              00000006
+VR0                               00000000
+VR1                               00000001
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE 13
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+VR2                               00000002
+VR3                               00000003
+VRCON                             00000099
+VREN                              00000007
+VRR                               00000005
+W                                 00000000
+WPU                               00000095
+WPU0                              00000000
+WPU1                              00000001
+WPU2                              00000002
+WPU4                              00000004
+WPU5                              00000005
+WR                                00000001
+WREN                              00000002
+WRERR                             00000003
+Z                                 00000002
+_BODEN_OFF                        00003FBF
+_BODEN_ON                         00003FFF
+_BOREN_OFF                        00003FBF
+_BOREN_ON                         00003FFF
+_COIL                             00000005
+_CONFIG                           00002007
+_COUT                             00000002
+_CPD_OFF                          00003FFF
+_CPD_ON                           00003EFF
+_CP_OFF                           00003FFF
+_CP_ON                            00003F7F
+_DEVID1                           00002006
+_EC_OSC                           00003FFB
+_EXTRC_OSC_CLKOUT                 00003FFF
+_EXTRC_OSC_NOCLKOUT               00003FFE
+_FOSC_EC                          00003FFB
+_FOSC_EXTRCCLK                    00003FFF
+_FOSC_EXTRCIO                     00003FFE
+_FOSC_HS                          00003FFA
+_FOSC_INTRCCLK                    00003FFD
+_FOSC_INTRCIO                     00003FFC
+_FOSC_LP                          00003FF8
+_FOSC_XT                          00003FF9
+_HS_OSC                           00003FFA
+_IDLOC0                           00002000
+_IDLOC1                           00002001
+_IDLOC2                           00002002
+_IDLOC3                           00002003
+_INTRC_OSC_CLKOUT                 00003FFD
+_INTRC_OSC_NOCLKOUT               00003FFC
+_LP_OSC                           00003FF8
+_MCLRE_OFF                        00003FDF
+_MCLRE_ON                         00003FFF
+_P0                               00000000
+_P1                               00000001
+_P2                               00000002
+_P3                               00000003
+MPASM  5.51                          MAIN.ASM   5-16-2016  0:04:28         PAGE 14
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+_P4                               00000004
+_P5                               00000005
+_PWRTE_OFF                        00003FFF
+_PWRTE_ON                         00003FEF
+_VACUUM                           00000003
+_WDTE_OFF                         00003FF7
+_WDTE_ON                          00003FFF
+_WDT_OFF                          00003FF7
+_WDT_ON                           00003FFF
+_XT_OSC                           00003FF9
+__12F675                          00000001
+_bank0                            bcf STATUS,RP0
+_bank1                            bsf STATUS,RP0
+decrement                         00000055
+dropcoil                          0000005E
+end_interrupt                     0000000B
+f_run                             0
+faz                               00000093
+first_run                         00000063
+increment                         0000004B
+main                              00000010
+next_edge                         0000002C
+not_first_run                     0000006A
+restart                           00000029
+status_temp                       0000002D
+tmrH                              00000029
+tmrL                              0000002A
+w_temp                            0000002C
+wait_advance                      00000040
+wait_rising_edge                  00000031
+waiting_advance_end               00000046
+
+Errors   :     0
+Warnings :     0 reported,     0 suppressed
+Messages :     5 reported,     0 suppressed
+
+
